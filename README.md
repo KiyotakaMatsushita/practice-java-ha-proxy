@@ -102,21 +102,102 @@ cp .env.example .env
 ### 3. アプリケーションのビルドと起動
 
 ```bash
-# 全サービスのビルドと起動
+# 方法1: deployスクリプトを使用（推奨）
+./scripts/deploy.sh up
+
+# 方法2: Docker Composeを直接使用
 docker-compose up --build -d
 
-# スケールアウト（Jettyインスタンスを5つに増やす）
-docker-compose up -d --scale spring-app=5
+# モニタリング付きで起動
+./scripts/deploy.sh up --monitoring
 ```
 
 ### 4. 動作確認
 
 ```bash
-# ヘルスチェック
-curl http://localhost/health
+# ヘルスチェックスクリプトの実行
+./scripts/health-check.sh
 
-# 負荷分散の確認
-for i in {1..10}; do curl http://localhost/api/instance; done
+# または個別に確認
+# APIエンドポイントの確認
+curl http://localhost/api/test
+
+# インスタンス情報の確認
+curl http://localhost/api/instance | jq
+
+# 負荷分散の確認（異なるインスタンスIDが返される）
+for i in 1 2 3; do 
+  echo "Request $i:"
+  curl -s http://localhost/api/instance | jq -r .instanceId
+done
+```
+
+## 利用可能なエンドポイント
+
+### アプリケーションAPI
+
+- `GET /api/instance` - インスタンス情報を取得
+- `GET /api/test` - テストエンドポイント（リクエストカウント付き）
+- `POST /api/heavy?iterations=5000` - 重い処理のシミュレーション
+- `GET /api/metrics/custom` - カスタムメトリクスの取得
+
+### ヘルスチェック・メトリクス
+
+- `GET /actuator/health` - ヘルスチェック
+- `GET /actuator/info` - アプリケーション情報
+- `GET /actuator/metrics` - メトリクス一覧
+- `GET /actuator/prometheus` - Prometheus形式のメトリクス
+
+### 管理インターフェース
+
+- HAProxy統計情報: http://localhost:8404/stats
+  - ユーザー名: admin
+  - パスワード: admin
+
+## 運用操作
+
+### スケーリング
+
+```bash
+# 5インスタンスにスケールアウト
+./scripts/deploy.sh scale --instances 5
+
+# または直接Docker Composeで
+docker-compose up -d --scale spring-app=5
+```
+
+### ログの確認
+
+```bash
+# すべてのログを確認
+./scripts/deploy.sh logs --follow
+
+# 特定のサービスのログ
+docker-compose logs -f haproxy
+docker-compose logs -f spring-app
+```
+
+### システムステータス
+
+```bash
+# 全体のステータス確認
+./scripts/deploy.sh status
+
+# リソース使用状況
+docker stats
+```
+
+### 停止・再起動
+
+```bash
+# 停止
+./scripts/deploy.sh down
+
+# 再起動
+./scripts/deploy.sh restart
+
+# 完全なクリーンアップ
+./scripts/deploy.sh clean
 ```
 
 ## 主な機能
@@ -140,14 +221,46 @@ for i in {1..10}; do curl http://localhost/api/instance; done
 
 ## 負荷テスト
 
-### Apache Benchを使用した例
+### 負荷テストスクリプトの使用
 
 ```bash
-# 1000リクエスト、同時接続数100
+# デフォルト設定で実行（10000リクエスト、同時接続数100）
+./scripts/load-test.sh
+
+# カスタム設定で実行
+./scripts/load-test.sh --requests 5000 --concurrency 50
+
+# 特定のエンドポイントをテスト
+./scripts/load-test.sh --endpoint /api/heavy --requests 100
+
+# ヘルプの表示
+./scripts/load-test.sh --help
+```
+
+### Apache Benchを直接使用
+
+```bash
+# 基本的な負荷テスト
 ab -n 1000 -c 100 http://localhost/api/test
 
-# JMeterを使用した高度なテスト
-./scripts/load-test.sh
+# POSTリクエストの負荷テスト
+ab -n 100 -c 10 -p post_data.txt -T application/json http://localhost/api/heavy?iterations=1000
+
+# 詳細な統計情報付き
+ab -n 1000 -c 100 -g results.tsv http://localhost/api/test
+```
+
+### 負荷テスト結果の確認
+
+```bash
+# HAProxy統計情報でリアルタイム確認
+open http://localhost:8404/stats
+
+# コンテナのリソース使用状況
+docker stats
+
+# アプリケーションのカスタムメトリクス
+curl http://localhost/api/metrics/custom | jq
 ```
 
 ## 設定のカスタマイズ
@@ -172,9 +285,51 @@ docker-compose up -d --scale spring-app=10
 ### コンテナの状態確認
 
 ```bash
+# 全コンテナの状態
 docker-compose ps
-docker-compose logs -f haproxy
-docker-compose logs -f spring-app
+
+# 特定のサービスのログ確認
+docker-compose logs --tail=50 haproxy
+docker-compose logs --tail=50 spring-app
+
+# リアルタイムログ監視
+docker-compose logs -f
+```
+
+### よくある問題と解決方法
+
+#### HAProxyが起動しない
+
+```bash
+# エラーログの確認
+docker-compose logs haproxy | grep ERROR
+
+# 設定ファイルの構文チェック
+docker run --rm -v $(pwd)/haproxy:/usr/local/etc/haproxy:ro haproxy:2.8-alpine haproxy -c -f /usr/local/etc/haproxy/haproxy.cfg
+
+# よくある原因：設定ファイルの最終行に改行がない場合
+echo >> haproxy/haproxy.cfg
+```
+
+#### Spring Bootアプリケーションが起動しない
+
+```bash
+# Javaのメモリ不足の場合
+# docker-compose.ymlでJAVA_OPTSを調整
+JAVA_OPTS=-Xmx1g -Xms512m
+
+# ポート競合の確認
+lsof -i :8080
+```
+
+#### 負荷分散が機能しない
+
+```bash
+# ヘルスチェックの状態確認
+curl -u admin:admin http://localhost:8404/stats | grep "web_servers"
+
+# 個別インスタンスへの直接アクセステスト
+docker exec practice-java-ha-proxy-spring-app-1 curl -s localhost:8080/actuator/health
 ```
 
 ### パフォーマンスの問題
@@ -182,6 +337,19 @@ docker-compose logs -f spring-app
 - HAProxyの統計情報確認: `http://localhost:8404/stats`
 - JVMヒープサイズの調整
 - コネクションプールの設定確認
+
+### デバッグモード
+
+```bash
+# HAProxyのデバッグモード起動
+docker-compose exec haproxy haproxy -d
+
+# Spring Bootのデバッグログ有効化
+# application.ymlで設定
+logging:
+  level:
+    com.example.haproxy: DEBUG
+```
 
 ## 参考資料
 
